@@ -11,7 +11,7 @@ import wandb
 
 # 导入
 from models import UnifiedAligner
-from losses import DistributedContrastiveLoss
+from losses import DualAnchorContrastiveLoss
 
 class Config:
     audio_encoder_path = "/data1/yizhuo/ULIA/ckpt/models--Atotti--Qwen3-Omni-AudioTransformer/snapshots/cf943f056d4bd5f647a735a02efae7aa2d772af1"
@@ -39,7 +39,8 @@ class XCaptureDataset(torch.utils.data.Dataset):
                 if os.path.exists(rgb) and os.path.exists(wav): self.samples.append((rgb, wav))
         self.target_sr = target_sr
 
-    def __len__(self): return len(self.samples)
+    def __len__(self): 
+        return len(self.samples)
     def __getitem__(self, idx):
         rgb_p, wav_p = self.samples[idx]
         img = Image.open(rgb_p).convert("RGB")
@@ -68,7 +69,7 @@ def main():
     # 2. Model & Loss (Wrapped in DDP)
     model = UnifiedAligner(cfg).to(device)
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
-    criterion = DistributedContrastiveLoss().to(device)
+    criterion = DualAnchorContrastiveLoss().to(device)
 
     # 3. Data
     clip_proc = CLIPProcessor.from_pretrained(cfg.clip_path)
@@ -83,7 +84,7 @@ def main():
     scaler = torch.cuda.amp.GradScaler(enabled=cfg.use_fp16)
 
     if rank == 0:
-        wandb.init(project="MultiModal-DDP-Align", name="Unified-Run")
+        wandb.init(project="MultiModal-Align", name="Unified-Run")
 
     for epoch in range(cfg.epochs):
         sampler.set_epoch(epoch)
