@@ -35,7 +35,7 @@ class DualAnchorContrastiveLoss(nn.Module):
         text_all = self.gather_features(text_emb)
         img_all = self.gather_features(img_emb)
 
-        loss_dict = {"loss": 0.0}
+        loss_dict = {"loss/loss": 0.0}
         
         # 遍历所有需要对齐的模态
         other_modalities = ['audio_embed', 'depth_embed', 'tactile_embed', 'spatial_embed']
@@ -49,21 +49,21 @@ class DualAnchorContrastiveLoss(nn.Module):
                 if text_emb is not None:
                     l_m2t = self.contrastive_pair(m_emb, text_all, logit_scale, labels)
                     l_t2m = self.contrastive_pair(text_emb, m_all, logit_scale, labels)
-                    loss_dict[f'loss_{m_key}_to_text'] = (l_m2t + l_t2m) / 2
-                    loss_dict['loss'] += loss_dict[f'loss_{m_key}_to_text']
+                    loss_dict[f'loss/loss_{m_key}_to_text'] = (l_m2t + l_t2m) / 2
+                    loss_dict['loss/loss'] += loss_dict[f'loss/loss_{m_key}_to_text']
                 
                 # 2. 与 Image 对齐
                 if img_emb is not None:
                     l_m2i = self.contrastive_pair(m_emb, img_all, logit_scale, labels)
                     l_i2m = self.contrastive_pair(img_emb, m_all, logit_scale, labels)
-                    loss_dict[f'loss_{m_key}_to_img'] = (l_m2i + l_i2m) / 2
-                    loss_dict['loss'] += loss_dict[f'loss_{m_key}_to_img']
+                    loss_dict[f'loss/loss_{m_key}_to_img'] = (l_m2i + l_i2m) / 2
+                    loss_dict['loss/loss'] += loss_dict[f'loss/loss_{m_key}_to_img']
 
         # 3. 双核互相对齐 (Text <-> Image)
         if text_emb is not None and img_emb is not None:
             l_t2i = self.contrastive_pair(text_emb, img_all, logit_scale, labels)
             l_i2t = self.contrastive_pair(img_emb, text_all, logit_scale, labels)
-            loss_dict['loss_text_img'] = (l_t2i + l_i2t) / 2
-            loss_dict['loss'] += loss_dict['loss_text_img']
+            loss_dict['loss/loss_text_img'] = (l_t2i + l_i2t) / 2
+            loss_dict['loss/loss'] += loss_dict['loss/loss_text_img']
 
         return loss_dict

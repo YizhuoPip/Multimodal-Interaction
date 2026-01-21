@@ -1,8 +1,12 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import CLIPModel, Qwen3OmniMoeAudioEncoder
-from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import _get_feat_extract_output_lengths
+from transformers import CLIPModel
+from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
+    Qwen3OmniMoeAudioEncoder,
+    _get_feat_extract_output_lengths,
+)
+from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import Qwen3OmniMoeAudioEncoderConfig
 
 class UnifiedAligner(nn.Module):
     def __init__(self, cfg):
@@ -11,14 +15,24 @@ class UnifiedAligner(nn.Module):
         
         # --- 核心双核：CLIP (Text & RGB) ---
         self.clip = CLIPModel.from_pretrained(cfg.clip_path)
+        for param in self.clip.parameters():
+            param.requires_grad = False
+        self.clip.logit_scale.requires_grad = True
         self.embed_dim = self.clip.config.projection_dim
         
         # --- 音频核：Qwen3-Omni ---
-        self.audio_encoder = Qwen3OmniMoeAudioEncoder.from_pretrained(cfg.audio_encoder_path)
+        audio_config = Qwen3OmniMoeAudioEncoderConfig.from_pretrained(cfg.audio_encoder_path)
+        if cfg.use_flash_attention:
+            audio_config._attn_implementation = "flash_attention_2"
+        self.audio_encoder = Qwen3OmniMoeAudioEncoder.from_pretrained(
+            cfg.audio_encoder_path,
+            config=audio_config,
+            attn_implementation="flash_attention_2" if cfg.use_flash_attention else None,
+            dtype=torch.float32,
+        )
         self.audio_proj = nn.Linear(self.audio_encoder.config.output_dim, self.embed_dim)
 
-        # --- 占位符：Depth, Tactile, Spatial (目前仅定义投影层，Encoder待定) ---
-        # 假设未来的 Encoder 输出维度为 768
+        # --- Depth, Tactile, Spatial ---
         self.depth_proj = nn.Linear(768, self.embed_dim)
         self.tactile_proj = nn.Linear(768, self.embed_dim)
         self.spatial_proj = nn.Linear(768, self.embed_dim)
@@ -47,7 +61,8 @@ class UnifiedAligner(nn.Module):
             audio_values = batch["audio_values"]
             mask = batch.get("audio_attention_mask")
             B, _, T = audio_values.shape
-            if mask is None: mask = torch.ones((B, T), device=audio_values.device)
+            if mask is None or mask.shape[-1] != T:
+                mask = torch.ones((B, T), dtype=torch.long, device=audio_values.device)
             feat_lens = mask.sum(-1)
             packed = audio_values.permute(0, 2, 1)[mask.bool()].permute(1, 0)
             
