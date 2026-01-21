@@ -8,16 +8,18 @@ class DualAnchorContrastiveLoss(nn.Module):
         super().__init__()
 
     def gather_features(self, tensor):
-        if tensor is None or not dist.is_initialized(): return tensor
+        if tensor is None or not dist.is_initialized(): 
+            return tensor
+
         world_size = dist.get_world_size()
         gathered = [torch.zeros_like(tensor) for _ in range(world_size)]
         dist.all_gather(gathered, tensor)
-        gathered[dist.get_rank()] = tensor
+        #gathered[dist.get_rank()] = tensor
         return torch.cat(gathered, dim=0)
 
     def contrastive_pair(self, feat1, feat2_all, logit_scale, labels):
-        """计算单向对比损失"""
-        logits = logit_scale * feat1 @ feat2_all.t()
+        #feat1 局部, feat2 全局
+        logits = logit_scale * feat1 @ feat2_all.t() # [local_bs, global_bs]
         return F.cross_entropy(logits, labels)
 
     def forward(self, outputs):
@@ -29,7 +31,7 @@ class DualAnchorContrastiveLoss(nn.Module):
         device = (text_emb if text_emb is not None else img_emb).device
         local_bs = (text_emb if text_emb is not None else img_emb).size(0)
         rank = dist.get_rank() if dist.is_initialized() else 0
-        labels = torch.arange(local_bs, device=device) + rank * local_bs
+        labels = torch.arange(local_bs, device=device) + rank * local_bs # 自己batch的偏移
 
         # Gather 全局 Anchor
         text_all = self.gather_features(text_emb)

@@ -107,7 +107,7 @@ def main():
 
     loader = DataLoader(dataset, batch_size=cfg.batch_size, sampler=sampler, 
                         collate_fn=get_collate_fn(clip_proc, audio_proc), num_workers=4, pin_memory=True)
-    val_loader = DataLoader(dataset, batch_size=cfg.batch_size, sampler=sampler, 
+    val_loader = DataLoader(val_dataset, batch_size=cfg.batch_size, sampler=val_sampler, 
                         collate_fn=get_collate_fn(clip_proc, audio_proc), num_workers=4, pin_memory=True)
     if rank == 0:
         print(f"train_loader {len(train_samples)} val_loader {len(val_samples)}")
@@ -126,6 +126,7 @@ def main():
 
     for epoch in range(cfg.epochs):
         sampler.set_epoch(epoch)
+        val_sampler.set_epoch(epoch)
         model.train()
         model.module.clip.eval()
         pbar = tqdm(loader, disable=(rank != 0))

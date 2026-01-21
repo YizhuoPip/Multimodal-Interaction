@@ -49,7 +49,6 @@ class DistributedMultiModalEvaluator:
 
     def _all_gather_and_clean(self, local_feat, loader):
         world_size = dist.get_world_size()
-        rank = dist.get_rank()
         
         # 获取各卡样本数
         local_size = torch.tensor([local_feat.size(0)], device=self.device)
@@ -58,24 +57,30 @@ class DistributedMultiModalEvaluator:
         
         # 为了 all_gather 成功，必须补齐到最大长度
         max_size = max([s.item() for s in size_list])
-        dim = local_feat.size(1)
         
-        padded_local = F.pad(local_feat, (0, 0, 0, max_size - local_feat.size(0)))
+        padded_local = F.pad(local_feat, (0, 0, 0, max_size - local_feat.size(0))) #[max_size, dim]
         gather_list = [torch.zeros_like(padded_local) for _ in range(world_size)]
         dist.all_gather(gather_list, padded_local)
         
-        # 合并并根据实际 dataset 长度裁剪 (剔除 DistributedSampler 的 padding)
+        # 合并并根据实际 dataset 长度裁剪，剔除刚才的padding
         all_feat = torch.cat([gather_list[i][:size_list[i]] for i in range(world_size)], dim=0)
         
         dataset_len = len(loader.dataset)
-        return all_feat[:dataset_len]
+        if all_feat.size(0) != dataset_len:
+            raise ValueError(
+                f"All-gathered features length mismatch: "
+                f"got {all_feat.size(0)}, expected {dataset_len}"
+            )
+
+        return all_feat
 
     def _calculate_metrics(self, storage):
         results = {}
         # 遍历查询模态 (如 Audio)
         for q_key in self.query_keys:
             q_feat = storage[q_key]
-            if q_feat is None: continue
+            if q_feat is None: 
+                continue
             
             # 遍历锚点模态 (如 Image/Text)
             for a_key in self.anchor_keys:
