@@ -11,6 +11,16 @@ class DistributedMultiModalEvaluator:
         # 定义检索关系：用 queries 去匹配 anchors
         self.anchor_keys = ["text_embed", "image_embed"]
         self.query_keys = ["audio_embed", "depth_embed", "tactile_embed", "spatial_embed"]
+    
+    def gather_features(self, tensor):
+        if tensor is None or not dist.is_initialized(): 
+            return tensor
+
+        world_size = dist.get_world_size()
+        gathered = [torch.zeros_like(tensor) for _ in range(world_size)]
+        dist.all_gather(gathered, tensor)
+        #gathered[dist.get_rank()] = tensor
+        return torch.cat(gathered, dim=0)
 
     @torch.no_grad()
     def evaluate(self, model, val_loader):
@@ -38,7 +48,7 @@ class DistributedMultiModalEvaluator:
                 continue
             
             local_feat = torch.cat(local_storage[k], dim=0)
-            global_storage[k] = self._all_gather_and_clean(local_feat, val_loader)
+            global_storage[k] = self.gather_features(local_feat)
 
         metrics = {}
         if dist.get_rank() == 0:
@@ -46,33 +56,6 @@ class DistributedMultiModalEvaluator:
             
         dist.barrier()
         return metrics
-
-    def _all_gather_and_clean(self, local_feat, loader):
-        world_size = dist.get_world_size()
-        
-        # 获取各卡样本数
-        local_size = torch.tensor([local_feat.size(0)], device=self.device)
-        size_list = [torch.zeros_like(local_size) for _ in range(world_size)]
-        dist.all_gather(size_list, local_size)
-        
-        # 为了 all_gather 成功，必须补齐到最大长度
-        max_size = max([s.item() for s in size_list])
-        
-        padded_local = F.pad(local_feat, (0, 0, 0, max_size - local_feat.size(0))) #[max_size, dim]
-        gather_list = [torch.zeros_like(padded_local) for _ in range(world_size)]
-        dist.all_gather(gather_list, padded_local)
-        
-        # 合并并根据实际 dataset 长度裁剪，剔除刚才的padding
-        all_feat = torch.cat([gather_list[i][:size_list[i]] for i in range(world_size)], dim=0)
-        
-        dataset_len = len(loader.dataset)
-        if all_feat.size(0) != dataset_len:
-            raise ValueError(
-                f"All-gathered features length mismatch: "
-                f"got {all_feat.size(0)}, expected {dataset_len}"
-            )
-
-        return all_feat
 
     def _calculate_metrics(self, storage):
         results = {}

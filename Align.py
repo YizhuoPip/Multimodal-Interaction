@@ -24,7 +24,7 @@ class Config:
     train_ratio = 0.9
     target_sr = 16000
     batch_size = 32  # 每个 GPU 的 batch_size
-    epochs = 150
+    epochs = 100
     lr = 1e-4
     use_fp16 = True
     use_flash_attention = False
@@ -74,28 +74,31 @@ def get_collate_fn(clip_p, audio_p):
 
 # --- Main Training ---
 def main():
-    # 1. Initialize DDP
+    cfg = Config()
+    # Initialize DDP
     dist.init_process_group(backend="nccl")
     local_rank = int(os.environ["LOCAL_RANK"])
     rank = dist.get_rank()
+    world_size = dist.get_world_size()
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
-    cfg = Config()
 
-    # 2. Model & Loss (Wrapped in DDP)
+    # Model & Loss (Wrapped in DDP)
     model = UnifiedAligner(cfg).to(device)
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     criterion = DualAnchorContrastiveLoss().to(device)
     evaluator = DistributedMultiModalEvaluator(device=device, ks=[1, 10, 30])
 
-    # 3. Data
+    # Data
     samples = scan_xcapture(cfg.data_root)
+    random.seed(42)
     random.shuffle(samples)
     split = int(len(samples) * cfg.train_ratio)
 
     train_samples = samples[:split]
     val_samples = samples[split:]
+
     dataset = XCaptureDataset(train_samples, cfg.target_sr)
     val_dataset = XCaptureDataset(val_samples, cfg.target_sr)
 
@@ -112,9 +115,10 @@ def main():
     if rank == 0:
         print(f"train_loader {len(train_samples)} val_loader {len(val_samples)}")
 
-    # 4. Optimizer & Scaler
+    # Optimizer & Scaler
     optimizer = torch.optim.AdamW(trainable_params, lr=cfg.lr)
-    scaler = torch.cuda.amp.GradScaler(enabled=cfg.use_fp16)
+    #scaler = torch.cuda.amp.GradScaler(enabled=cfg.use_fp16)
+    scaler = torch.cuda.amp.GradScaler(init_scale=2**10)
 
     if cfg.use_fp16 and device.type == "cuda":
         autocast_dtype = torch.float16
