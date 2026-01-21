@@ -11,7 +11,6 @@ import wandb
 import random
 from typing import List, Tuple
 
-# 导入
 from models import UnifiedAligner
 from losses import DualAnchorContrastiveLoss
 from evaluator import DistributedMultiModalEvaluator
@@ -66,8 +65,10 @@ class XCaptureDataset(torch.utils.data.Dataset):
 
 def get_collate_fn(clip_p, audio_p):
     def collate(batch):
+        #text_in = clip_p(text=[b["text"] for b in batch], return_tensors="pt", padding=True, truncation=True)
         img_in = clip_p(images=[b["image"] for b in batch], return_tensors="pt")
         aud_in = audio_p([b["audio"] for b in batch], sampling_rate=16000, padding=True, return_tensors="pt")
+        #return {"input_ids":text_in["input_ids"], "text_attention_mask": text_in.get("attention_mask"), "pixel_values": img_in["pixel_values"], "audio_values": aud_in["input_features"], "audio_attention_mask": aud_in.get("attention_mask")}
         return {"pixel_values": img_in["pixel_values"], "audio_values": aud_in["input_features"], "audio_attention_mask": aud_in.get("attention_mask")}
     return collate
 
@@ -110,6 +111,7 @@ def main():
                         collate_fn=get_collate_fn(clip_proc, audio_proc), num_workers=4, pin_memory=True)
     if rank == 0:
         print(f"train_loader {len(train_samples)} val_loader {len(val_samples)}")
+
     # 4. Optimizer & Scaler
     optimizer = torch.optim.AdamW(trainable_params, lr=cfg.lr)
     scaler = torch.cuda.amp.GradScaler(enabled=cfg.use_fp16)
