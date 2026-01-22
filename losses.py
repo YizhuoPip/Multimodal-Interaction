@@ -61,11 +61,12 @@ class DualAnchorContrastiveLoss(nn.Module):
                     loss_dict[f'loss/loss_{m_key}_to_img'] = (l_m2i + l_i2m) / 2
                     loss_dict['loss/loss'] += loss_dict[f'loss/loss_{m_key}_to_img']
 
-        # 3. 双核互相对齐 (Text <-> Image)
+        '''
         if text_emb is not None and img_emb is not None:
             l_t2i = self.contrastive_pair(text_emb, img_all, logit_scale, labels)
             l_i2t = self.contrastive_pair(img_emb, text_all, logit_scale, labels)
             loss_dict['loss/loss_text_img'] = (l_t2i + l_i2t) / 2
             loss_dict['loss/loss'] += loss_dict['loss/loss_text_img']
+        '''
 
         return loss_dict

@@ -9,6 +9,7 @@ from PIL import Image
 from tqdm import tqdm
 import wandb
 import random
+import pandas as pd
 from typing import List, Tuple
 
 from models import UnifiedAligner
@@ -23,11 +24,17 @@ class Config:
     
     train_ratio = 0.9
     target_sr = 16000
-    batch_size = 32  # 每个 GPU 的 batch_size
+    batch_size = 64  # 每个 GPU 的 batch_size
     epochs = 100
     lr = 1e-4
     use_fp16 = True
     use_flash_attention = False
+    seed = 42
+
+def set_seed(seed):
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 # --- Data Helpers ---
 def scan_xcapture(root_dir: str) -> List[Tuple[str, str]]:
@@ -47,29 +54,32 @@ def scan_xcapture(root_dir: str) -> List[Tuple[str, str]]:
     return samples
 
 class XCaptureDataset(torch.utils.data.Dataset):
-    def __init__(self, samples, target_sr=16000):
+    def __init__(self, samples, csv_path, target_sr=16000):
         self.samples = samples
         self.target_sr = target_sr
+        df = pd.read_csv(csv_path)
+        self.txt_mapping = dict(zip(df.iloc[:, 0], df.iloc[:, 1]))
 
     def __len__(self): 
         return len(self.samples)
 
     def __getitem__(self, idx):
         rgb_p, wav_p = self.samples[idx]
+        text = self.txt_mapping.get(rgb_p, "a photo of ")
         img = Image.open(rgb_p).convert("RGB")
         wav, sr = torchaudio.load(wav_p)
         wav = wav.mean(dim=0)
         if sr != self.target_sr: 
             wav = torchaudio.functional.resample(wav, sr, self.target_sr)
-        return {"image": img, "audio": wav.numpy().astype("float32")}
+        return {"image": img, "audio": wav.numpy().astype("float32"), "text": text}
 
 def get_collate_fn(clip_p, audio_p):
     def collate(batch):
-        #text_in = clip_p(text=[b["text"] for b in batch], return_tensors="pt", padding=True, truncation=True)
+        text_in = clip_p(text=[b["text"] for b in batch], return_tensors="pt", padding=True, truncation=True)
         img_in = clip_p(images=[b["image"] for b in batch], return_tensors="pt")
         aud_in = audio_p([b["audio"] for b in batch], sampling_rate=16000, padding=True, return_tensors="pt")
-        #return {"input_ids":text_in["input_ids"], "text_attention_mask": text_in.get("attention_mask"), "pixel_values": img_in["pixel_values"], "audio_values": aud_in["input_features"], "audio_attention_mask": aud_in.get("attention_mask")}
-        return {"pixel_values": img_in["pixel_values"], "audio_values": aud_in["input_features"], "audio_attention_mask": aud_in.get("attention_mask")}
+        return {"input_ids":text_in["input_ids"], "text_attention_mask": text_in.get("attention_mask"), "pixel_values": img_in["pixel_values"], "audio_values": aud_in["input_features"], "audio_attention_mask": aud_in.get("attention_mask")}
+        #return {"pixel_values": img_in["pixel_values"], "audio_values": aud_in["input_features"], "audio_attention_mask": aud_in.get("attention_mask")}
     return collate
 
 # --- Main Training ---
@@ -82,25 +92,25 @@ def main():
     world_size = dist.get_world_size()
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
+    #set_seed(cfg.seed)
 
     # Model & Loss (Wrapped in DDP)
     model = UnifiedAligner(cfg).to(device)
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     criterion = DualAnchorContrastiveLoss().to(device)
-    evaluator = DistributedMultiModalEvaluator(device=device, ks=[1, 10, 30])
+    evaluator = DistributedMultiModalEvaluator(device=device, ks=[1, 5, 10, 20, 30])
 
     # Data
     samples = scan_xcapture(cfg.data_root)
-    random.seed(42)
     random.shuffle(samples)
     split = int(len(samples) * cfg.train_ratio)
 
     train_samples = samples[:split]
     val_samples = samples[split:]
 
-    dataset = XCaptureDataset(train_samples, cfg.target_sr)
-    val_dataset = XCaptureDataset(val_samples, cfg.target_sr)
+    dataset = XCaptureDataset(train_samples, '/data1/yizhuo/ULIA/image_descriptions.csv', cfg.target_sr)
+    val_dataset = XCaptureDataset(val_samples, '/data1/yizhuo/ULIA/image_descriptions.csv', cfg.target_sr)
 
     clip_proc = CLIPProcessor.from_pretrained(cfg.clip_path)
     audio_proc = AutoProcessor.from_pretrained(cfg.qwen_processor_path).feature_extractor
@@ -117,8 +127,7 @@ def main():
 
     # Optimizer & Scaler
     optimizer = torch.optim.AdamW(trainable_params, lr=cfg.lr)
-    #scaler = torch.cuda.amp.GradScaler(enabled=cfg.use_fp16)
-    scaler = torch.cuda.amp.GradScaler(init_scale=2**10)
+    scaler = torch.cuda.amp.GradScaler(enabled=cfg.use_fp16)
 
     if cfg.use_fp16 and device.type == "cuda":
         autocast_dtype = torch.float16
