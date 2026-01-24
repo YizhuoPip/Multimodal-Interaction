@@ -43,21 +43,21 @@ class UnifiedAligner(nn.Module):
             "depth_embed": None, "tactile_embed": None, "spatial_embed": None
         }
         
-        # 1. Text (CLIP Text Encoder)
-        if "input_ids" in batch:
+        # Text (CLIP Text Encoder)
+        if "input_ids" in batch and self.cfg.use_vision:
             text_outputs = self.clip.get_text_features(
                 input_ids=batch["input_ids"],
                 attention_mask=batch.get("text_attention_mask")
             )
             outputs["text_embed"] = F.normalize(text_outputs, dim=-1)
 
-        # 2. RGB (CLIP Vision Encoder)
-        if "pixel_values" in batch:
+        # RGB (CLIP Vision Encoder)
+        if "pixel_values" in batch and self.cfg.use_text:
             img_feat = self.clip.get_image_features(pixel_values=batch["pixel_values"])
             outputs["image_embed"] = F.normalize(img_feat, dim=-1)
 
-        # 3. Audio
-        if "audio_values" in batch:
+        # Audio
+        if "audio_values" in batch and self.cfg.use_audio:
             audio_values = batch["audio_values"]
             mask = batch.get("audio_attention_mask")
             B, _, T = audio_values.shape
@@ -74,7 +74,7 @@ class UnifiedAligner(nn.Module):
                 start += l
             outputs["audio_embed"] = F.normalize(self.audio_proj(torch.stack(vectors, dim=0)), dim=-1)
 
-        # 4-6. Depth, Tactile, Spatial
+        # Depth, Tactile, Spatial
         
         outputs["logit_scale"] = self.clip.logit_scale.exp().clamp(max=100)
         return outputs

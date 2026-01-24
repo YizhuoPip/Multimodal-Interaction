@@ -30,6 +30,9 @@ class Config:
     use_fp16 = True
     use_flash_attention = False
     seed = 42
+    use_vision = True
+    use_text = True
+    use_audio = True
 
 def set_seed(seed):
     random.seed(seed)
@@ -161,11 +164,12 @@ def main():
                 wandb.log(loss_dict)
                 pbar.set_description(f"Epoch {epoch} Loss: {loss.item():.4f}")
 
-        val_metrics = evaluator.evaluate(model, val_loader)
+        val_metrics, val_loss = evaluator.evaluate(model, val_loader)
             
         if rank == 0:
             print(f"Epoch {epoch} Metrics: {val_metrics}")
             wandb.log(val_metrics)
+            wandb.log(val_loss)
         
         dist.barrier()
 

@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 import torch.distributed as dist
 from tqdm import tqdm
+from losses import DualAnchorContrastiveLoss
 
 class DistributedMultiModalEvaluator:
     def __init__(self, device, ks=[1, 10, 30]):
@@ -11,6 +12,7 @@ class DistributedMultiModalEvaluator:
         # 定义检索关系：用 queries 去匹配 anchors
         self.anchor_keys = ["text_embed", "image_embed"]
         self.query_keys = ["audio_embed", "depth_embed", "tactile_embed", "spatial_embed"]
+        self.criterion = DualAnchorContrastiveLoss().to(device)
     
     def gather_features(self, tensor):
         if tensor is None or not dist.is_initialized(): 
@@ -36,6 +38,9 @@ class DistributedMultiModalEvaluator:
             
             with torch.autocast(device_type=self.device.type, dtype=torch.float16, enabled=(self.device.type == "cuda")):
                 outputs = model(batch)
+
+            loss_dict = self.criterion(outputs)
+            eval_loss = {f"eval_{k}": v for k, v in loss_dict.items()}
             
             for k in all_keys:
                 if outputs.get(k) is not None:
@@ -55,7 +60,7 @@ class DistributedMultiModalEvaluator:
             metrics = self._calculate_metrics(global_storage)
             
         dist.barrier()
-        return metrics
+        return metrics, eval_loss
 
     def _calculate_metrics(self, storage):
         results = {}
