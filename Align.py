@@ -23,6 +23,7 @@ class Config:
     data_root = "/data1/yizhuo/XCapture_data"
     
     train_ratio = 0.9
+    warmup_ratio = 0.1
     target_sr = 16000
     batch_size = 64  # 每个 GPU 的 batch_size
     epochs = 100
@@ -102,7 +103,7 @@ def main():
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     criterion = DualAnchorContrastiveLoss().to(device)
-    evaluator = DistributedMultiModalEvaluator(device=device, ks=[1, 5, 10, 20, 30])
+    evaluator = DistributedMultiModalEvaluator(device=device, ks=[1, 10, 30])
 
     # Data
     samples = scan_xcapture(cfg.data_root)
@@ -128,8 +129,19 @@ def main():
     if rank == 0:
         print(f"train_loader {len(train_samples)} val_loader {len(val_samples)}")
 
-    # Optimizer & Scaler
+    # Optimizer & Scaler & warm up
     optimizer = torch.optim.AdamW(trainable_params, lr=cfg.lr)
+
+    total_steps = len(loader) * cfg.epochs
+    warmup_steps = max(1, int(total_steps * cfg.warmup_ratio))
+
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            return float(current_step + 1) / float(max(1, warmup_steps))
+        progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        return 0.5 * (1.0 + torch.cos(torch.tensor(progress * 3.141592653589793)).item())
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     scaler = torch.cuda.amp.GradScaler(enabled=cfg.use_fp16)
 
     if cfg.use_fp16 and device.type == "cuda":
@@ -138,7 +150,7 @@ def main():
         autocast_dtype = torch.float32
 
     if rank == 0:
-        wandb.init(project="MultiModal-Align", name="Unified-Run")
+        wandb.init(project="MultiModal-Align", name="text-image-audio align")
 
     for epoch in range(cfg.epochs):
         sampler.set_epoch(epoch)
@@ -159,6 +171,7 @@ def main():
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
+            scheduler.step()
 
             if rank == 0:
                 wandb.log(loss_dict)
