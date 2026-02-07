@@ -44,7 +44,7 @@ class UnifiedAligner(nn.Module):
         }
         
         # Text (CLIP Text Encoder)
-        if "input_ids" in batch and self.cfg.use_vision:
+        if "input_ids" in batch and self.cfg.use_text:
             text_outputs = self.clip.get_text_features(
                 input_ids=batch["input_ids"],
                 attention_mask=batch.get("text_attention_mask")
@@ -52,7 +52,7 @@ class UnifiedAligner(nn.Module):
             outputs["text_embed"] = F.normalize(text_outputs, dim=-1)
 
         # RGB (CLIP Vision Encoder)
-        if "pixel_values" in batch and self.cfg.use_text:
+        if "pixel_values" in batch and self.cfg.use_vision:
             img_feat = self.clip.get_image_features(pixel_values=batch["pixel_values"])
             outputs["image_embed"] = F.normalize(img_feat, dim=-1)
 

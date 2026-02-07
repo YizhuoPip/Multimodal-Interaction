@@ -1,4 +1,5 @@
 import os
+import io
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -15,6 +16,7 @@ from typing import List, Tuple
 from models import UnifiedAligner
 from losses import DualAnchorContrastiveLoss
 from evaluator import DistributedMultiModalEvaluator
+from datasets import scan_xcapture, XCaptureDataset
 
 class Config:
     audio_encoder_path = "/data1/yizhuo/ULIA/ckpt/models--Atotti--Qwen3-Omni-AudioTransformer/snapshots/cf943f056d4bd5f647a735a02efae7aa2d772af1"
@@ -25,7 +27,7 @@ class Config:
     train_ratio = 0.9
     warmup_ratio = 0.1
     target_sr = 16000
-    batch_size = 64  # 每个 GPU 的 batch_size
+    batch_size = 32  # 每个 GPU 的 batch_size
     epochs = 100
     lr = 1e-4
     use_fp16 = True
@@ -35,47 +37,48 @@ class Config:
     use_text = True
     use_audio = True
 
-def set_seed(seed):
-    random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+def broadcast_object(obj, src=0):
+    """将Python对象从src rank广播到所有rank"""
+    rank = dist.get_rank()
+    
+    if rank == src:
+        buffer = io.BytesIO()
+        torch.save(obj, buffer)
+        data = buffer.getvalue()
+        size = torch.tensor([len(data)], dtype=torch.long, device='cuda')
+        data_tensor = torch.ByteTensor(list(data)).cuda()  # 修复这里
+    else:
+        size = torch.tensor([0], dtype=torch.long, device='cuda')
+    
+    # 广播大小
+    dist.broadcast(size, src=src)
+    
+    if rank != src:
+        data_tensor = torch.empty(size.item(), dtype=torch.uint8, device='cuda')
+    
+    # 广播数据
+    dist.broadcast(data_tensor, src=src)
+    
+    if rank != src:
+        buffer = io.BytesIO(data_tensor.cpu().numpy())
+        obj = torch.load(buffer, map_location='cpu')
+    
+    return obj
 
-# --- Data Helpers ---
-def scan_xcapture(root_dir: str) -> List[Tuple[str, str]]:
-    samples = []
-    for scene_id in sorted(os.listdir(root_dir)):
-        scene_path = os.path.join(root_dir, scene_id)
-        if not os.path.isdir(scene_path):
-            continue
-        for clip_id in sorted(os.listdir(scene_path)):
-            clip_path = os.path.join(scene_path, clip_id)
-            if not os.path.isdir(clip_path):
-                continue
-            rgb_path = os.path.join(clip_path, "vision", "rgb.png")
-            audio_path = os.path.join(clip_path, "audio", "audio.wav")
-            if os.path.exists(rgb_path) and os.path.exists(audio_path):
-                samples.append((rgb_path, audio_path))
-    return samples
+def set_seed_for_distributed(seed, rank):
+    """为分布式训练设置种子"""
+    # 设置随机种子
+    random.seed(seed + rank * 1000)
+    torch.manual_seed(seed + rank * 1000)
+    torch.cuda.manual_seed(seed + rank * 1000)
+    torch.cuda.manual_seed_all(seed + rank * 1000)
+    
+    # 确保确定性计算（防止CUDA随机性）
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
-class XCaptureDataset(torch.utils.data.Dataset):
-    def __init__(self, samples, csv_path, target_sr=16000):
-        self.samples = samples
-        self.target_sr = target_sr
-        df = pd.read_csv(csv_path)
-        self.txt_mapping = dict(zip(df.iloc[:, 0], df.iloc[:, 1]))
-
-    def __len__(self): 
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        rgb_p, wav_p = self.samples[idx]
-        text = self.txt_mapping.get(rgb_p, "a photo of ")
-        img = Image.open(rgb_p).convert("RGB")
-        wav, sr = torchaudio.load(wav_p)
-        wav = wav.mean(dim=0)
-        if sr != self.target_sr: 
-            wav = torchaudio.functional.resample(wav, sr, self.target_sr)
-        return {"image": img, "audio": wav.numpy().astype("float32"), "text": text}
 
 def get_collate_fn(clip_p, audio_p):
     def collate(batch):
@@ -96,7 +99,36 @@ def main():
     world_size = dist.get_world_size()
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
-    #set_seed(cfg.seed)
+
+    # seed
+    set_seed_for_distributed(cfg.seed, rank)
+    
+    if rank == 0:
+        samples = scan_xcapture(cfg.data_root)
+        print(f"Total samples: {len(samples)}")
+        
+        rng = random.Random(cfg.seed)  
+        indices = list(range(len(samples)))
+        rng.shuffle(indices)
+        
+        split = int(len(samples) * cfg.train_ratio)
+        train_indices = indices[:split]
+        val_indices = indices[split:]
+        
+        print(f"Train samples: {len(train_indices)}, Val samples: {len(val_indices)}")
+    else:
+        samples = None
+        train_indices = None
+        val_indices = None
+    
+    # 广播所有必要数据
+    samples = broadcast_object(samples, src=0)
+    train_indices = broadcast_object(train_indices, src=0)
+    val_indices = broadcast_object(val_indices, src=0)
+    
+    # 根据indices创建样本列表
+    train_samples = [samples[i] for i in train_indices]
+    val_samples = [samples[i] for i in val_indices]
 
     # Model & Loss (Wrapped in DDP)
     model = UnifiedAligner(cfg).to(device)
@@ -106,21 +138,14 @@ def main():
     evaluator = DistributedMultiModalEvaluator(device=device, ks=[1, 10, 30])
 
     # Data
-    samples = scan_xcapture(cfg.data_root)
-    random.shuffle(samples)
-    split = int(len(samples) * cfg.train_ratio)
-
-    train_samples = samples[:split]
-    val_samples = samples[split:]
-
     dataset = XCaptureDataset(train_samples, '/data1/yizhuo/ULIA/image_descriptions.csv', cfg.target_sr)
     val_dataset = XCaptureDataset(val_samples, '/data1/yizhuo/ULIA/image_descriptions.csv', cfg.target_sr)
 
     clip_proc = CLIPProcessor.from_pretrained(cfg.clip_path)
     audio_proc = AutoProcessor.from_pretrained(cfg.qwen_processor_path).feature_extractor
     
-    sampler = DistributedSampler(dataset, shuffle=True)
-    val_sampler = DistributedSampler(val_dataset, shuffle=False)
+    sampler = DistributedSampler(dataset, shuffle=True, seed=cfg.seed)
+    val_sampler = DistributedSampler(val_dataset, shuffle=False, seed=cfg.seed)
 
     loader = DataLoader(dataset, batch_size=cfg.batch_size, sampler=sampler, 
                         collate_fn=get_collate_fn(clip_proc, audio_proc), num_workers=4, pin_memory=True)
