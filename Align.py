@@ -40,29 +40,29 @@ class Config:
 def broadcast_object(obj, src=0):
     """将Python对象从src rank广播到所有rank"""
     rank = dist.get_rank()
-    
+
     if rank == src:
         buffer = io.BytesIO()
         torch.save(obj, buffer)
         data = buffer.getvalue()
         size = torch.tensor([len(data)], dtype=torch.long, device='cuda')
-        data_tensor = torch.ByteTensor(list(data)).cuda()  # 修复这里
+        data_tensor = torch.ByteTensor(list(data)).cuda()
     else:
         size = torch.tensor([0], dtype=torch.long, device='cuda')
-    
+
     # 广播大小
     dist.broadcast(size, src=src)
-    
+
     if rank != src:
         data_tensor = torch.empty(size.item(), dtype=torch.uint8, device='cuda')
-    
+
     # 广播数据
     dist.broadcast(data_tensor, src=src)
-    
+
     if rank != src:
         buffer = io.BytesIO(data_tensor.cpu().numpy())
         obj = torch.load(buffer, map_location='cpu')
-    
+
     return obj
 
 def set_seed_for_distributed(seed, rank):

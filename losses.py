@@ -8,13 +8,12 @@ class DualAnchorContrastiveLoss(nn.Module):
         super().__init__()
 
     def gather_features(self, tensor):
-        if tensor is None or not dist.is_initialized(): 
+        if tensor is None or not dist.is_initialized():
             return tensor
 
         world_size = dist.get_world_size()
         gathered = [torch.zeros_like(tensor) for _ in range(world_size)]
         dist.all_gather(gathered, tensor)
-        #gathered[dist.get_rank()] = tensor
         return torch.cat(gathered, dim=0)
 
     def contrastive_pair(self, feat1, feat2_all, logit_scale, labels):

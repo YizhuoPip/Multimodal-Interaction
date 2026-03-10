@@ -15,52 +15,76 @@ class DistributedMultiModalEvaluator:
         self.criterion = DualAnchorContrastiveLoss().to(device)
     
     def gather_features(self, tensor):
-        if tensor is None or not dist.is_initialized(): 
+        if tensor is None or not dist.is_initialized():
             return tensor
 
         world_size = dist.get_world_size()
         gathered = [torch.zeros_like(tensor) for _ in range(world_size)]
         dist.all_gather(gathered, tensor)
-        #gathered[dist.get_rank()] = tensor
         return torch.cat(gathered, dim=0)
 
     @torch.no_grad()
     def evaluate(self, model, val_loader):
         model.eval()
-        
+
         all_keys = self.anchor_keys + self.query_keys
         local_storage = {k: [] for k in all_keys}
 
+        # 累积 loss 统计
+        local_loss_sum = {}  # 本 rank 所有 batch 的 loss 累加
+        num_batches = 0
+
         pbar = tqdm(val_loader, desc="DDP Validating", disable=(dist.get_rank() != 0))
         for batch in pbar:
-            batch = {k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v 
+            batch = {k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                     for k, v in batch.items()}
-            
+
             with torch.autocast(device_type=self.device.type, dtype=torch.float16, enabled=(self.device.type == "cuda")):
                 outputs = model(batch)
 
             loss_dict = self.criterion(outputs)
-            eval_loss = {f"eval_{k}": v for k, v in loss_dict.items()}
-            
+
+            # 累积 loss (detach 避免占用显存)
+            for k, v in loss_dict.items():
+                if k not in local_loss_sum:
+                    local_loss_sum[k] = 0.0
+                local_loss_sum[k] += v.detach().item()
+            num_batches += 1
+
             for k in all_keys:
                 if outputs.get(k) is not None:
                     local_storage[k].append(outputs[k].detach())
+
+        # 跨 rank 同步 loss
+        if dist.is_initialized():
+            for k in local_loss_sum:
+                # 将 loss 转为 tensor 进行 all_reduce
+                loss_tensor = torch.tensor(local_loss_sum[k], device=self.device)
+                dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+                local_loss_sum[k] = loss_tensor.item()
+            # 统计总 batch 数
+            total_batches = torch.tensor(num_batches, device=self.device)
+            dist.all_reduce(total_batches, op=dist.ReduceOp.SUM)
+            num_batches = total_batches.item()
+
+        # 计算 average loss
+        avg_loss = {f"eval_{k}": v / num_batches for k, v in local_loss_sum.items()}
 
         global_storage = {}
         for k in all_keys:
             if not local_storage[k]:
                 global_storage[k] = None
                 continue
-            
+
             local_feat = torch.cat(local_storage[k], dim=0)
             global_storage[k] = self.gather_features(local_feat)
 
         metrics = {}
         if dist.get_rank() == 0:
             metrics = self._calculate_metrics(global_storage)
-            
+
         dist.barrier()
-        return metrics, eval_loss
+        return metrics, avg_loss
 
     def _calculate_metrics(self, storage):
         results = {}
